@@ -7,7 +7,7 @@ variable "cluster-name" {
 provider "aws" {
   access_key = ""
   secret_key = ""
-  region     = "us-east-1"
+  region     = ""
 }
 
 
@@ -130,6 +130,36 @@ EOF
 
 
 
+resource "aws_iam_policy" "policy_cloudwatch" {
+  name        = "policy_cloudwatch"
+  description = "This policy allow EKS workers to send logs into cloudwatch"
+
+  policy = <<EOF
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Action": [
+        "logs:CreateLogStream",
+        "logs:CreateLogGroup",
+        "logs:DescribeLogGroups",
+        "logs:DescribeLogStreams",
+        "logs:PutLogEvents"
+      ],
+      "Effect": "Allow",
+      "Resource": "*"
+    }
+  ]
+}
+EOF
+
+}
+
+resource "aws_iam_role_policy_attachment" "demo-cluster-AmazonCloudWatchPolicy" {
+  policy_arn = "${aws_iam_policy.policy_cloudwatch.arn}"
+  role       = "${aws_iam_role.demo-cluster.name}"
+}
+
 resource "aws_iam_role_policy_attachment" "demo-cluster-AmazonEKSALBPolicy" {
   policy_arn = "${aws_iam_policy.alb_policy.arn}"
   role       = "${aws_iam_role.demo-cluster.name}"
@@ -157,6 +187,7 @@ resource "aws_security_group" "demo-cluster" {
   description = "Cluster communication with worker nodes"
   vpc_id      = "${aws_vpc.demo.id}"
 
+
   egress {
     from_port   = 0
     to_port     = 0
@@ -167,18 +198,11 @@ resource "aws_security_group" "demo-cluster" {
   
 }
 
-# OPTIONAL: Allow inbound traffic from your local workstation external IP
-#           to the Kubernetes. You will need to replace A.B.C.D below with
-#           your real IP. Services like icanhazip.com can help you find this.
-/*resource "aws_security_group_rule" "demo-cluster-ingress-workstation-https" {
-  cidr_blocks       = ["A.B.C.D/32"]
-  description       = "Allow workstation to communicate with the cluster API Server"
-  from_port         = 443
-  protocol          = "tcp"
-  security_group_id = "${aws_security_group.demo-cluster.id}"
-  to_port           = 443
-  type              = "ingress"
-}*/
+// Key
+resource "aws_kms_key" "eks" {
+  description = "EKS Secret Encryption Key"
+}
+
 
 //EKS Master Cluster
 
@@ -191,6 +215,17 @@ resource "aws_eks_cluster" "demo" {
     security_group_ids = ["${aws_security_group.demo-cluster.id}"]
     subnet_ids         = flatten(["${aws_subnet.demo.*.id}"])
   }
+
+  encryption_config {
+      provider   { key_arn = aws_kms_key.eks.arn }
+      resources        = ["secrets"]
+  }
+ 
+ timeouts {
+    create = "20m"
+    delete = "20m"
+  }
+
 
   depends_on = [
     "aws_iam_role_policy_attachment.demo-cluster-AmazonEKSClusterPolicy",
@@ -261,6 +296,7 @@ POLICY
 
 
 
+
 resource "aws_iam_role_policy_attachment" "demo-node-AmazonEKSWorkerNodePolicy" {
   policy_arn = "arn:aws:iam::aws:policy/AmazonEKSWorkerNodePolicy"
   role       = "${aws_iam_role.demo-node.name}"
@@ -287,6 +323,13 @@ resource "aws_iam_role_policy_attachment" "demo-node-AWSXRayDaemonWriteAccess" {
 }
 
 
+resource "aws_iam_role_policy_attachment" "demo-node-AmazonCloudWatchPolicy" {
+  policy_arn = "arn:aws:iam::aws:policy/CloudWatchLogsFullAccess"
+  role       = "${aws_iam_role.demo-node.name}"
+}
+
+
+
 resource "aws_iam_instance_profile" "demo-node" {
   name = "terraform-eks-demo"
   role = "${aws_iam_role.demo-node.name}"
@@ -298,6 +341,14 @@ resource "aws_security_group" "demo-node" {
   name        = "terraform-eks-demo-node"
   description = "Security group for all nodes in the cluster"
   vpc_id      = "${aws_vpc.demo.id}"
+
+  ingress {
+    from_port   = 22
+    to_port     = 22
+    protocol    = "TCP"
+    cidr_blocks = ["0.0.0.0/0"]
+  }
+
 
   egress {
     from_port   = 0
@@ -369,7 +420,7 @@ resource "aws_iam_role" "eks_alb_ingress_controller" {
   description = "Permissions required by the Kubernetes AWS ALB Ingress controller to do it's job."
 
   force_detach_policies = true
-
+c
   assume_role_policy = <<ROLE
 {
   "Version": "2012-10-17",
@@ -452,6 +503,10 @@ resource "kubernetes_service_account" "ingress" {
       "app.kubernetes.io/name"       = "alb-ingress-controller"
       "app.kubernetes.io/managed-by" = "terraform"
     }
+    timeouts {
+      create = "20m"
+      delete = "20m"
+    }
     annotations = {
       "eks.amazonaws.com/role-arn" = aws_iam_role.eks_alb_ingress_controller.arn
     }
@@ -469,6 +524,8 @@ resource "aws_iam_role" "alb_role" {
 
 
 
+
+
 resource "aws_eks_node_group" "demo-node-group" {
   cluster_name    = "${var.cluster-name}"
   node_group_name = "demo-node-group"
@@ -482,6 +539,10 @@ resource "aws_eks_node_group" "demo-node-group" {
   }
   instance_types =   ["t2.medium"]
   
+  timeouts {
+    create = "20m"
+    delete = "20m"
+  }
   remote_access {
     ec2_ssh_key = "test_key_pair"
     source_security_group_ids = ["${aws_security_group.demo-node.id}"]
@@ -514,94 +575,7 @@ resource "aws_eks_node_group" "demo-node-group" {
 
 }
 
-// Required Kubernetes Configuration to Join Worker Nodes
 
-/*locals {
-  config-map-aws-auth = <<CONFIGMAPAWSAUTH
-
-
-apiVersion: v1
-kind: ConfigMap
-metadata:
-  name: aws-auth
-  namespace: kube-system
-data:
-  mapRoles: |
-    - rolearn: ${aws_iam_role.demo-node.arn}
-      username: system:node:{{EC2PrivateDNSName}}
-      groups:
-        - system:bootstrappers
-        - system:nodes
-CONFIGMAPAWSAUTH
-}
-
-output "config-map-aws-auth" {
-  value = "${local.config-map-aws-auth}"
-}
-
-data "aws_ami" "eks-worker" {
-  filter {
-    name   = "name"
-    values = ["amazon-eks-node-v*"]
-  }
-
-  most_recent = true
-  owners      = ["602401143452"] # Amazon Account ID
-}
-
-# This data source is included for ease of sample architecture deployment
-# and can be swapped out as necessary.
-data "aws_region" "current" {}
-
-# EKS currently documents this required userdata for EKS worker nodes to
-# properly configure Kubernetes applications on the EC2 instance.
-# We utilize a Terraform local here to simplify Base64 encoding this
-# information into the AutoScaling Launch Configuration.
-# More information: https://docs.aws.amazon.com/eks/latest/userguide/launch-workers.html
-locals {
-  demo-node-userdata = <<USERDATA
-#!/bin/bash
-set -o xtrace
-/etc/eks/bootstrap.sh --apiserver-endpoint '${aws_eks_cluster.demo.endpoint}' --b64-cluster-ca '${aws_eks_cluster.demo.certificate_authority.0.data}' '${var.cluster-name}'
-USERDATA
-}
-
-
-resource "aws_launch_configuration" "demo" {
-  associate_public_ip_address = true
-  iam_instance_profile        = "${aws_iam_instance_profile.demo-node.name}"
-  image_id                    = "${data.aws_ami.eks-worker.id}"
-  instance_type               = "t2.micro"
-  name_prefix                 = "terraform-eks-demo"
-  security_groups             = ["${aws_security_group.demo-node.id}"]
-  user_data_base64            = "${base64encode(local.demo-node-userdata)}"
-
-  lifecycle {
-    create_before_destroy = true
-  }
-}
-
-resource "aws_autoscaling_group" "demo" {
-  desired_capacity     = 1
-  launch_configuration = "${aws_launch_configuration.demo.id}"
-  max_size             = 2
-  min_size             = 1
-  name                 = "terraform-eks-demo"
-  vpc_zone_identifier  = flatten(["${aws_subnet.demo.*.id}"])
-
-  tag {
-    key                 = "Name"
-    value               = "terraform-eks-demo"
-    propagate_at_launch = true
-  }
-
-  tag {
-    key                 = "kubernetes.io/cluster/${var.cluster-name}"
-    value               = "owned"
-    propagate_at_launch = true
-  }
-}
-*/
 resource "aws_ecr_repository" "terraform-eks-demo-ecr" {
   name = "terraform-eks-demo-ecr"
 }
