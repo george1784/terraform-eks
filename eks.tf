@@ -420,7 +420,7 @@ resource "aws_iam_role" "eks_alb_ingress_controller" {
   description = "Permissions required by the Kubernetes AWS ALB Ingress controller to do it's job."
 
   force_detach_policies = true
-c
+
   assume_role_policy = <<ROLE
 {
   "Version": "2012-10-17",
